@@ -1,6 +1,69 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+좋습니다. 핵심만 딱 정리드릴게요.
+
+알고리즘 4줄 요약
+
+GNSS /ublox/fix를 미터좌표로 변환 → 점프 제거 + LPF → 이동거리 가중 원형평균으로 헤딩 안정화(저속/정지 시 헤딩 프리즈 & 롤인).
+
+웨이포인트는 리샘플링 후 사용, 룩어헤드 Ld=L0+kv·v + 전방 윈도우 + ±30° 각도 게이트로 타깃을 선택, 이탈 시 근방 후보 중 거리+각도 비용 최소로 복귀.
+
+조향각 = (이동벡터, 타깃벡터) 사이각 → LPF → ±steer_limit_deg 클램프, 속도명령 = const_speed - k·|조향| → RTK 상태에 따라 속도 캡 적용.
+
+RTK에 따라 도착반경 스케일링(FIX/FLOAT/NONE) 후 반경 내 진입 시 인덱스 전진, 실시간 시각화/로그.
+
+코스별 “변수 대응” 정리
+1) 출발할 때
+
+변수: roll_in_m, v_stop_th, freeze_time_s, heading_min_move_m, heading_max_jump_deg, heading_hist_len
+
+동작: 첫 Fix에서 경로 접선으로 초기 헤딩 설정 → roll_in_m 만큼은 그 헤딩 유지(직진 롤인). 속도 추정이 v_stop_th 이하로 freeze_time_s 지속되면 헤딩 프리즈로 튐 억제.
+
+팁: 정지 후 재출발 튐이 보이면 roll_in_m↑ 또는 heading_min_move_m↑로 보수적으로 잡으시면 됩니다.
+
+2) 직진 코스
+
+변수: lookahead_L0, lookahead_kv, forward_window, steer_limit_deg, fc/fs(=LPF), gps_outlier_th
+
+동작: 직진에선 룩어헤드가 앞쪽 점을 바로 선택 → 조향은 LPF + ±제한으로 미세 진동 억제.
+
+팁: 직선에서 조향이 들쑥이면 fc↓(필터 강하게) 또는 lookahead_L0↑로 더 멀리 보게 하시면 안정적입니다.
+
+3) 곡선 코스
+
+변수: lookahead_L0, lookahead_kv, k_steer_slowdown, speed_min, steer_limit_deg
+
+동작: 속도가 높을수록 Ld가 커져 부드럽게 진입, 조향 절대값이 커질수록 k_steer_slowdown에 의해 자동 감속되어 오버슈트 방지.
+
+팁: 코너에서 언더/오버슈트가 보이면 kv↑(더 멀리)와 k_steer_slowdown↑(더 감속) 조합이 잘 먹힙니다.
+
+4) 교차로 코스
+
+변수: forward_window, rejoin_max_deg(≈30°), rejoin_search_r, rejoin_lambda, rejoin_expand_steps
+
+동작: 타깃 선정 시 전방 윈도우 + ±각도 게이트로 옆 가지 진입 차단. 이탈 감지 시 반경 내 후보 중 거리 + λ·각도 최소비용으로 복귀 타깃 재지정.
+
+팁: 옆길로 새면 rejoin_max_deg↓(예 25°) 또는 forward_window↓로 전방 제약을 더 강하게 주세요.
+
+5) 정지 코스(신호대기 등)
+
+변수: v_stop_th, freeze_time_s, roll_in_m, (RTK 연동) rtk_speed_cap_*, rtk_radius_scale_*
+
+동작: 정지 판정되면 헤딩 프리즈로 드리프트 억제, 재출발 초반엔 롤인 헤딩 유지. RTK가 나빠지면 속도 캡/도착반경 확대로 보수 운행.
+
+팁: 재출발 첫 1~2 m가 흔들리면 freeze_time_s↑와 roll_in_m↑를 함께 조정해 보세요.
+
+제 의견(주관적)
+
+현재 구조는 교차로 이탈·정지 후 튐 같은 실전 이슈를 파라미터로 잘 제어할 수 있게 설계돼서, 튜닝 난이도 대비 안정성이 좋습니다.
+
+곡선 품질은 룩어헤드·감속 만으로도 충분히 좋아지지만, 추후 곡률 기반 속도 계획(lookahead 대신 곡률로 v 프로파일링)을 넣으면 더 매끈해질 겁니다.
+
+교차로에서 아주 근접하게 가지가 겹치면, 여기에 차선 코리도어(횡오차 한계) 추가 게이트까지 넣으면 “옆길 방지”가 한층 단단해집니다.
+
+센서 측면에선 GNSS만으로도 잘 돌아가지만, IMU 요레이트까지 섞으면 저속·정지 구간 헤딩 안정성은 체감적으로 더 올라갑니다.
+
 waypoint_tracker_topics.py  (ROS1 Noetic, Ubuntu)
 ─────────────────────────────────────────────────────────────────────────────
 통합 기능 (A~E, F 제외)
