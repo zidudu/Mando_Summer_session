@@ -475,7 +475,7 @@ def main():
 
     rospy.init_node('waypoint_tracker_topics', anonymous=False)
 
-    ublox_ns = rospy.get_param('~ublox_ns', '/ublox')
+    ublox_ns = rospy.get_param('~ublox_ns', '/gps1')
     params = {
         'fix_topic':        rospy.get_param('~fix_topic',    ublox_ns + '/fix'),
         'relpos_topic':     rospy.get_param('~relpos_topic', ublox_ns + '/navrelposned'),
