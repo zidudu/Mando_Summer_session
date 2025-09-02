@@ -498,7 +498,7 @@ def main():
 
     # ── 파라미터 로드 ─────────────────────────────
     # ROS 파라미터 서버에서 값 가져오고, 없으면 기본값 사용
-    ublox_ns = rospy.get_param('~ublox_ns', '/ublox')
+    ublox_ns = rospy.get_param('~ublox_ns', '/gps1')
     params = {
         'fix_topic':        rospy.get_param('~fix_topic',    ublox_ns + '/fix'),             # GNSS 좌표
         'relpos_topic':     rospy.get_param('~relpos_topic', ublox_ns + '/navrelposned'),    # RTK 상대좌표
