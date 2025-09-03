@@ -11,14 +11,18 @@ waypoint_tracker_topics.py  (ROS1 Noetic, Ubuntu)
 기능 요약(요청 반영):
 1) 시작 워밍업: start_warmup_sec 동안 speed=1, steer=0 고정(조향 계산 무시)
 2) 정지-재출발 안정화:
-   - 저속/무이동 시 헤딩 hold-last + 전/전전 헤딩 후보 중 '타겟과 각오차 최소' 선택
-   - 정지 직전 헤딩 스냅샷 → 재출발 시 우선 사용
+   - 저속/무이동 시 헤딩 hold-last + 전/전전 헤딩 후보중 '타겟과 각오차 최소'를 선택
+   - 정지 직전 헤딩 스냅샷 → 재출발 시 우선 사용(완만히 전환)
    - 이동 변화율 데드존: Δs < max(ratio*dist_to_target, min_m)면 steer=0
-3) 순차 인덱스 고정 + 반경 히스테리시스(radius_hit_count회 연속 진입 시 인덱스 증가)
-4) 전/후 로우패스: 좌표(동적 게이팅+LPF) → 조향 LPF, 헤딩 원형 EMA
-5) 속도 명령: "code/const" + 상한 + 하드 고정(SPEED_FORCE)
+3) 순차 인덱스 고정 + 반경 히스테리시스(radius_hit_count회 연속 진입 시에만 인덱스 증가)
+4) 이탈/복귀 모드:
+   - dist_to_target > offtrack_trigger_mult*target_radius 이면 복귀 후보 검색
+   - 현재 헤딩 대비 ±recovery_heading_limit_deg(기본 30°) 내에서
+     recovery_search_radius 내 가장 가까운 '앞쪽 인덱스' 후보를 타겟으로 잠금
+   - 복귀 완료(반경 진입) 시 정상 모드로 복귀
+5) 전/후 로우패스: 좌표(동적 게이팅+LPF) → 조향 LPF, 헤딩 원형 EMA
+6) 속도 명령: "code/const" + 상한 + 하드 고정(SPEED_FORCE)
 
-※ 이탈감지/복귀 모드 및 카메라 보정 훅은 제거되었습니다.
 """
 
 import os
@@ -98,7 +102,7 @@ STOP_HOLD_SEC_DEFAULT    = 0.5     # [s] 연속 유지 시 정지 스냅샷
 RESTART_MIN_SPEED_DEFAULT= 0.30    # [m/s] 재출발 간주
 
 # (C) 조향 데드존(이동 변화율 기반)
-STEER_DEADZONE_MOVE_RATIO_DEFAULT = 0.005  # dist_to_target의 1% 미만 이동이면 (0.01에서 0.005로 바꿈)
+STEER_DEADZONE_MOVE_RATIO_DEFAULT = 0.005  # dist_to_target의 1% 미만 이동이면
 STEER_DEADZONE_MOVE_MIN_M_DEFAULT = 0.01  # 최소 5cm 기준
 
 # (D) 헤딩 후보 선택(전/전전 포함)
@@ -108,6 +112,12 @@ HEAD_GOOD_RATIO_DEFAULT  = 0.75    # raw_error의 75% 이하로 줄이는 후보
 
 # (E) 반경 히스테리시스
 RADIUS_HIT_COUNT_DEFAULT = 2       # 연속 N회 반경 내에 들어와야 인덱스 증가
+
+# (F) 이탈/복귀
+OFFTRACK_TRIGGER_MULT_DEF     = 4.0    # dist_to_target > 4*target_radius → 복귀 탐색
+RECOVERY_SEARCH_RADIUS_DEF    = 15.0   # [m] 복귀 후보 검색 반경
+RECOVERY_LOOKAHEAD_N_DEF      = 30     # 앞쪽 인덱스 범위
+RECOVERY_HEADING_LIMIT_DEG_DEF= 30.0   # 현재 헤딩 대비 허용 편차(앞바퀴 각도 고려)
 
 # (G) 시각화
 SHOW_ALL_WP_DEFAULT = True
@@ -173,6 +183,13 @@ _restart_confirm = 0
 
 # 전/전전 포함 헤딩 후보 버퍼
 _head_buf = deque(maxlen=HEAD_BUF_LEN_DEFAULT)  # (heading_rad, t, move_dist)
+
+# 반경 히스테리시스
+_radius_hit_consec = 0
+
+# 이탈/복귀
+_in_recovery = False
+_recovery_target_index = None
 
 # 시각화 축 고정
 AX_MIN_X = AX_MAX_X = AX_MIN_Y = AX_MAX_Y = None
@@ -315,6 +332,37 @@ def compute_speed_command():
         mps  = float(clamp(mps, 0.0, capm))
         return mps, mps, "const"
 
+# ── 복귀 후보 선택 ─────────────────────────────────
+def pick_recovery_target(cx, cy, heading_rad, start_idx):
+    """
+    현재 위치/헤딩에서 앞쪽 인덱스 범위 내에서
+    - 거리 <= recovery_search_radius
+    - 현재 헤딩 대비 각도차 <= recovery_heading_limit_deg
+    조건을 만족하는 가장 가까운 인덱스를 반환. 없으면 None.
+    """
+    lim_deg = float(params['recovery_heading_limit_deg'])
+    R = float(params['recovery_search_radius'])
+    look = int(params['recovery_lookahead_n'])
+
+    best_i = None
+    best_d = 1e18
+    if heading_rad is None:
+        return None
+
+    end_idx = min(len(waypoints_x)-1, start_idx + look)
+    for i in range(start_idx, end_idx+1):
+        tx, ty = waypoints_x[i], waypoints_y[i]
+        d = distance_m(cx, cy, tx, ty)
+        if d > R:
+            continue
+        bearing = math.atan2(ty - cy, tx - cx)
+        diff = abs(ang_diff_deg(bearing, heading_rad))
+        if diff <= lim_deg:
+            if d < best_d:
+                best_d = d
+                best_i = i
+    return best_i
+
 # ── 헤딩 후보 선택(전/전전 포함) ────────────────────
 def select_stable_heading(bearing_to_target, raw_heading):
     """
@@ -419,17 +467,20 @@ def _cb_fix(msg: NavSatFix):
         else:
             _speed_mps = 0.0
 
-        # 이동량/부트스트랩 체크
+        # 부트스트랩
         moved = False
         if current_x and current_y:
             dx = fx - current_x[-1]
             dy = fy - current_y[-1]
             moved = (dx*dx + dy*dy) > 1e-8
-            boot_dist = distance_m(current_x[0], current_y[0], fx, fy)
+
+        # 헤딩 갱신(부트스트랩 + 임계속도 + 실제 이동)
+        # 갱신 시 버퍼에도 보관
+        if current_x and current_y:
+            boot_dist = distance_m(current_x[0], current_y[0], fx, fy) if current_x and current_y else 0.0
         else:
             boot_dist = 0.0
 
-        # 헤딩 갱신(부트스트랩 + 임계속도 + 실제 이동)
         if (boot_dist >= float(params['bootstrap_dist'])) and (_speed_ema >= float(params['heading_min_speed'])) and moved:
             raw_heading = math.atan2(dy, dx)
             _last_fix_heading_rad = circ_ema(_last_fix_heading_rad, raw_heading, float(params['heading_alpha']))
@@ -437,6 +488,7 @@ def _cb_fix(msg: NavSatFix):
 
         # 정지/재출발 상태
         if _speed_ema <= float(params['stop_speed_eps']):
+            # 정지 유지 시간 누적
             if not _stopped_flag:
                 if _stop_since_t is None:
                     _stop_since_t = now
@@ -445,14 +497,16 @@ def _cb_fix(msg: NavSatFix):
                     _stop_heading_snapshot = _last_fix_heading_rad
                     _restart_confirm = 0
             else:
+                # 이미 정지 중
                 pass
         else:
             _stop_since_t = None
             if _stopped_flag and (_speed_ema >= float(params['restart_min_speed'])):
                 _restart_confirm += 1
+                # 몇 번의 유효 이동 샘플 후 정지 해제
                 if _restart_confirm >= 2:
                     _stopped_flag = False
-                    _restart_confirm = 0
+                    _restart_confirm = 0  # 재사용
 
         # push
         current_x.append(fx); current_y.append(fy); current_t.append(now)
@@ -475,7 +529,7 @@ def steering_from_vectors(heading_rad, cx, cy, tx, ty):
 # ── 시각화(plt.ion) & 제어 루프 ─────────────────────
 def update_plot_once(ax):
     global waypoint_index, _last_log_t, _last_speed_cmd, _last_speed_mode
-    global _head_buf
+    global _in_recovery, _recovery_target_index, _radius_hit_consec
 
     ax.clear()
 
@@ -517,8 +571,11 @@ def update_plot_once(ax):
     if cx and cy:
         ax.scatter(cx[-1], cy[-1], color='red', s=50, label='Current')
 
-        # 현재 타겟(순차 인덱스만 사용)
+        # 현재 사용 타겟 인덱스(복귀 중이면 복귀 타겟, 아니면 정상 인덱스)
         active_index = waypoint_index
+        if _in_recovery and (_recovery_target_index is not None):
+            active_index = _recovery_target_index
+
         tx, ty = waypoints_x[active_index], waypoints_y[active_index]
         ax.plot([cx[-1], tx], [cy[-1], ty], '--', c='cyan', lw=1.0, label='Target Line')
         ax.plot(tx, ty, '*', c='magenta', ms=12, label='Target')
@@ -578,24 +635,34 @@ def update_plot_once(ax):
         # --- 반경 히스테리시스: 순차 인덱스 고정 ---
         dist_to_active = distance_m(cx[-1], cy[-1], tx, ty)
         if dist_to_active <= float(params['target_radius']):
-            _radius_flag = True
+            _radius_hit_consec += 1
         else:
-            _radius_flag = False
+            _radius_hit_consec = 0
 
-        # 히스테리시스 카운트는 update_plot_once 스코프 로컬이 아닌, 전역 보관이 편하지만
-        # 외부 전역 사용을 피하려면 간단히 내부 정적 변수로 들고갈 수도 있음.
-        # 여기서는 간단히 전역을 쓰지 않고, 로컬 static-like 속성을 사용.
-        if not hasattr(update_plot_once, "_radius_hit_consec"):
-            update_plot_once._radius_hit_consec = 0
-        if _radius_flag:
-            update_plot_once._radius_hit_consec += 1
-        else:
-            update_plot_once._radius_hit_consec = 0
-
-        if update_plot_once._radius_hit_consec >= int(params['radius_hit_count']):
+        # 정상 모드에서만 인덱스 증가
+        if (not _in_recovery) and (_radius_hit_consec >= int(params['radius_hit_count'])):
             if waypoint_index < len(waypoints_x) - 1:
                 waypoint_index += 1
-            update_plot_once._radius_hit_consec = 0
+            _radius_hit_consec = 0
+
+        # --- 이탈/복귀 판단 ---
+        # 정상 모드에서 이탈 조건이면 복귀 타겟 선택
+        if (not _in_recovery):
+            if dist_to_active > float(params['offtrack_trigger_mult']) * float(params['target_radius']):
+                cand = pick_recovery_target(cx[-1], cy[-1], heading_rad, waypoint_index)
+                if cand is not None and cand > waypoint_index:
+                    _in_recovery = True
+                    _recovery_target_index = cand
+                    flags.append(f"RECOVERY→{cand+1}")
+
+        # 복귀 중이면 복귀 타겟 달성 시 정상 모드 복귀
+        if _in_recovery:
+            if dist_to_active <= float(params['target_radius']):
+                waypoint_index = _recovery_target_index
+                _in_recovery = False
+                _recovery_target_index = None
+                _radius_hit_consec = 0
+                flags.append("RECOVERY_DONE")
 
         # 화살표 시각화
         L = 2.0
@@ -674,7 +741,6 @@ def update_plot_once(ax):
 def main():
     global pub_speed, pub_steer, pub_rtk, waypoints_x, waypoints_y, alpha, params
     global AX_MIN_X, AX_MAX_X, AX_MIN_Y, AX_MAX_Y
-    global _head_buf
 
     rospy.init_node('waypoint_tracker_topics', anonymous=False)
 
@@ -731,6 +797,12 @@ def main():
         # 반경 히스테리시스
         'radius_hit_count':  int(rospy.get_param('~radius_hit_count', RADIUS_HIT_COUNT_DEFAULT)),
 
+        # 이탈/복귀
+        'offtrack_trigger_mult':   float(rospy.get_param('~offtrack_trigger_mult', OFFTRACK_TRIGGER_MULT_DEF)),
+        'recovery_search_radius':  float(rospy.get_param('~recovery_search_radius', RECOVERY_SEARCH_RADIUS_DEF)),
+        'recovery_lookahead_n':    int(rospy.get_param('~recovery_lookahead_n', RECOVERY_LOOKAHEAD_N_DEF)),
+        'recovery_heading_limit_deg': float(rospy.get_param('~recovery_heading_limit_deg', RECOVERY_HEADING_LIMIT_DEG_DEF)),
+
         # 시각화
         'show_all_waypoints': bool(rospy.get_param('~show_all_waypoints', SHOW_ALL_WP_DEFAULT)),
         'win_size':           int(rospy.get_param('~win_size', WIN_SIZE_DEFAULT)),
@@ -738,6 +810,7 @@ def main():
     }
 
     # head buffer 크기 갱신
+    global _head_buf
     _head_buf = deque(list(_head_buf), maxlen=int(params['head_buf_len']))
 
     # steer LPF 계수
