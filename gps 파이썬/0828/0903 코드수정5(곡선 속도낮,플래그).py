@@ -384,7 +384,8 @@ def compute_speed_command():
     if SPEED_FORCE is not None:
         mode, val = SPEED_FORCE
         if str(mode).lower() == 'code':
-            cap = int(params.get('speed_cap_code', SPEED_CAP_CODE_DEFAULT))
+            # [오류 수정] 파라미터 기본값을 직접 지정
+            cap = int(params.get('speed_cap_code', 4))
             code = int(clamp(int(val), 0, cap))
             return float(code), int(code), "code(force)"
         else:
@@ -394,7 +395,7 @@ def compute_speed_command():
 
     mode = rospy.get_param('~speed_mode', params['speed_mode']).strip().lower()
     if mode == "curve":
-        # [수정] 곡률 기반 속도 계산 로직
+        # 곡률 기반 속도 계산 로직
         active_idx = _recovery_target_index if _in_recovery and _recovery_target_index is not None else waypoint_index
         lookahead_idx = min(active_idx + int(params.get('curve_lookahead_idx', CURVE_LOOKAHEAD_IDX_DEFAULT)), len(waypoints_curvature) - 1)
         target_curvature = waypoints_curvature[lookahead_idx]
@@ -411,12 +412,14 @@ def compute_speed_command():
         mps = float(clamp(mps, 0.0, capm))
         return mps, mps, "curve"
     elif mode == "code":
-        code = int(rospy.get_param('~speed_code', SPEED_CODE_DEFAULT))
-        cap  = int(rospy.get_param('~speed_cap_code', SPEED_CAP_CODE_DEFAULT))
+        # [오류 수정] 파라미터 기본값을 직접 지정
+        code = int(rospy.get_param('~speed_code', 1))
+        cap  = int(rospy.get_param('~speed_cap_code', 4))
         code = int(clamp(code, 0, cap))
         return float(code), int(code), "code"
     else: # const
-        mps  = float(rospy.get_param('~const_speed', CONST_SPEED_DEFAULT))
+        # [오류 수정] 파라미터 기본값을 직접 지정
+        mps  = float(rospy.get_param('~const_speed', 1.0))
         capm = float(rospy.get_param('~speed_cap_mps', SPEED_CAP_MPS_DEFAULT))
         mps  = float(clamp(mps, 0.0, capm))
         return mps, mps, "const"
@@ -843,7 +846,7 @@ def update_plot_once(ax):
     # 축/스타일
     ax.set_title(f"ROS GPS Tracker  Steering: {smooth_deg:.2f}°  RTK: {rtk_txt}")
     ax.set_xlabel('X (meters)'); ax.set_ylabel('Y (meters)')
-    ax.axis('equal'); ax.grid(True, ls=':', alpha=0.5)
+    ax.axis('equal'); ax.grid(True, linestyle=':', alpha=0.5)
     if AX_MIN_X is not None:
         ax.set_xlim(AX_MIN_X, AX_MAX_X); ax.set_ylim(AX_MIN_Y, AX_MAX_Y)
     ax.legend(loc='upper right')
@@ -866,13 +869,10 @@ def main():
         'fc':             float(rospy.get_param('~fc',             FC_DEFAULT)),
         'fs':             float(rospy.get_param('~fs',             FS_DEFAULT)),
         'steer_limit_deg':float(rospy.get_param('~steer_limit_deg',STEER_LIMIT_DEG_DEFAULT)),
-        'const_speed':    float(rospy.get_param('~const_speed',    1.0)),
         'log_csv':        rospy.get_param('~log_csv',        LOG_CSV_DEFAULT),
 
         # 속도 명령
         'speed_mode':     rospy.get_param('~speed_mode',     SPEED_MODE_DEFAULT),
-        'speed_code':     int(rospy.get_param('~speed_code',       1)),
-        'speed_cap_code': int(rospy.get_param('~speed_cap_code',   4)),
         'speed_cap_mps':  float(rospy.get_param('~speed_cap_mps',  SPEED_CAP_MPS_DEFAULT)),
 
         # [신규] 곡률 기반 속도 제어 파라미터
