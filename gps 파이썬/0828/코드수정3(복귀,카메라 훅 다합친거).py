@@ -70,7 +70,7 @@ except Exception:
 # ── 전역 기본값 ─────────────────────────────────────
 TARGET_RADIUS_DEFAULT = 1.5
 MIN_WAYPOINT_DISTANCE_DEFAULT = 0.9
-FC_DEFAULT = 2.0                   # steer LPF [Hz]
+FC_DEFAULT = 1.0                   # steer LPF [Hz] (0903 2에서 1로 바꿈)
 FS_DEFAULT = 20.0                  # loop [Hz]
 STEER_LIMIT_DEG_DEFAULT = 20.0     # 조향 명령 제한 [deg]
 CONST_SPEED_DEFAULT = 1.0          # const 모드 기본 속도 [m/s]
@@ -85,7 +85,7 @@ SPEED_CAP_MPS_DEFAULT  = 4.0
 #   ('code', N)  → 정수 코드 N으로 고정 (0~4, 퍼블리시는 1.0/2.0/…)
 #   ('const', v) → v m/s로 고정 (0.0~4.0)
 #   None         → 비활성(파라미터 사용)
-SPEED_FORCE = ('code', 1)
+SPEED_FORCE = ('code', 2)
 # SPEED_FORCE = None
 
 # (1) 헤딩 안정화 파라미터
@@ -131,7 +131,7 @@ def _default_paths():
     except Exception:
         pkg_path = os.path.expanduser('~/catkin_ws/src/rtk_waypoint_tracker')
     cfg = os.path.join(pkg_path, 'config')
-    wp = os.path.join(cfg, 'left_lane.csv')
+    wp = os.path.join(cfg, 'raw_track_latlon_8.csv')
     log = os.path.join(cfg, f"waypoint_log_{time.strftime('%Y%m%d_%H%M%S')}.csv")
     return cfg, wp, log
 
