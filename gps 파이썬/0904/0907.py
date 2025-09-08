@@ -13,10 +13,10 @@ import math
 import time
 
 # ── 설정 ─────────────────────────────────────────────
-CSV_PATH = "/home/jigu/Downloads/left_turn.csv"
+CSV_PATH = "/home/jigu/catkin_ws/src/rtk_waypoint_tracker/scripts/left_lane.csv"
 WAYPOINT_SPACING = 2.5          # m
 TARGET_RADIUS_END = 2.0         # 최종 종착지 도달 반경
-MAX_STEER_DEG = 30.0            # 조향 제한 (deg)
+MAX_STEER_DEG = 20.0            # 조향 제한 (deg)
 SIGN_CONVENTION = -1.0          
 
 # Lookahead
@@ -190,7 +190,7 @@ def main():
             if DRAW_WAYPOINT_CIRCLES:
                 ax.add_patch(plt.Circle((x, y), TARGET_RADIUS_END, color='blue', fill=False, linestyle='--', alpha=0.5))
 
-    with open('/home/root1/Downloads/waypoints_3m.csv', 'w', newline='') as f:
+    with open('/home/jigu/catkin_ws/src/rtk_waypoint_tracker/logs/waypoints_3m.csv', 'w', newline='') as f:
         csv.writer(f).writerows(spaced_waypoints)
 
     nearest_idx_prev = 0
