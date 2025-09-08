@@ -47,7 +47,7 @@ GPS_TIMEOUT_SEC    = 1.0         # 최근 fix 없을 때 안전정지
 
 # ── 속도 명령 상수(코드에서 바로 고정하고 싶을 때) ──
 #  - dSPACE 요구: 1..6 등 정수 코드. None이면 rosparam(~speed_code) 사용.
-SPEED_FORCE_CODE = 2          # 예: 1 또는 2로 고정. rosparam 무시
+SPEED_FORCE_CODE = 3          # 예: 1 또는 2로 고정. rosparam 무시
 # SPEED_FORCE_CODE = None     # ← 이렇게 두면 rosparam(~speed_code) 사용
 SPEED_CAP_CODE_DEFAULT = 6    # 코드 상한(예: 6)
 
@@ -109,7 +109,7 @@ def _default_paths():
         pkg_path = os.path.expanduser('~/catkin_ws/src/rtk_waypoint_tracker')
 
     # 패키지 내부 config/left_lane.csv를 기본으로 사용
-    waypoint_csv = os.path.join(pkg_path, 'config', 'left_lane.csv')
+    waypoint_csv = os.path.join(pkg_path, 'config', 'raw_track_latlon_6.csv')
     logs_dir     = os.path.join(pkg_path, 'logs')
     os.makedirs(logs_dir, exist_ok=True)
     log_csv      = os.path.join(logs_dir, f"waypoint_log_{time.strftime('%Y%m%d_%H%M%S')}.csv")
