@@ -407,7 +407,7 @@ def _on_shutdown():
     try:
         rate = rospy.Rate(20)  # 20Hz = 50ms
         while speed_cmd_current_code > 0:
-            speed_cmd_current_code = max(0, speed_cmd_current_code - 4)  # 4씩 감소
+            speed_cmd_current_code = max(0, speed_cmd_current_code - 2)  # 2씩 감소
             if pub_speed:
                 pub_speed.publish(Float32(float(speed_cmd_current_code)))
             if pub_steer:
