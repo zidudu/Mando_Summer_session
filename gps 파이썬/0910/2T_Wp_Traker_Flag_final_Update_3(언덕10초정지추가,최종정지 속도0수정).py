@@ -381,8 +381,7 @@ def _cb_relpos(msg):
         rtk_status_txt = "NONE"
 
 def publish_all(event, one_based=True):
-    """주기 퍼블리시(속도/조향/RTK/인덱스) + 타임아웃/홀드 안전정지"""
-    global last_pub_speed_code, hold_active, hold_until, hold_reason
+    global last_pub_speed_code, hold_active, hold_until, hold_reason, final_stop_latched
     now = time.time()
     no_gps = (now - last_fix_time) > rospy.get_param('~gps_timeout_sec', GPS_TIMEOUT_SEC)
 
@@ -391,7 +390,7 @@ def publish_all(event, one_based=True):
         hold_active = False
         rospy.loginfo(f"[flag] HOLD done ({hold_reason})")
 
-    # 최종 정지 래치가 켜졌으면 무조건 0,0
+    # 최종 결정 (단일 블록)
     if no_gps or hold_active or final_stop_latched:
         v_out_int = 0
         steer_out = 0.0
@@ -399,26 +398,15 @@ def publish_all(event, one_based=True):
         v_out_int = int(speed_cmd_current_code)
         steer_out = float(latest_filtered_angle)
 
-    # # 퍼블리시는 Float32지만 값은 정수로 보냄
-    # if no_gps or hold_active:
-    #     v_out_int = 0
-    #     steer_out = 0.0
-    # else:
-    #     v_out_int = int(speed_cmd_current_code)
-    #     steer_out = float(latest_filtered_angle)
-
     if pub_speed: pub_speed.publish(Float32(float(v_out_int)))
     if pub_steer: pub_steer.publish(Float32(steer_out))
     if pub_rtk:   pub_rtk.publish(String(rtk_status_txt))
     if pub_wpidx:
-        if wp_index_active >= 0:
-            idx_pub = (wp_index_active + 1) if one_based else wp_index_active
-        else:
-            idx_pub = 0
+        idx_pub = (wp_index_active + 1) if (wp_index_active >= 0 and one_based) else (wp_index_active if wp_index_active >= 0 else 0)
         pub_wpidx.publish(Int32(int(idx_pub)))
 
     last_pub_speed_code = float(v_out_int)
-
+    
 def _on_shutdown():
     global speed_cmd_current_code
     rospy.loginfo("[tracker] shutdown: ramping down speed to 0")
@@ -448,7 +436,7 @@ def main():
     global _last_log_wall, last_pub_speed_code, flag_zones
     global speed_cmd_current_code, speed_desired_code
     global hold_active, hold_until, hold_reason, last_hold_wp_idx, zone_armed
-
+    global last_hold_zone_name, last_hold_zone_range, final_stop_latched
     rospy.init_node('rtk_waypoint_tracker', anonymous=False)
     rospy.on_shutdown(_on_shutdown)
 
