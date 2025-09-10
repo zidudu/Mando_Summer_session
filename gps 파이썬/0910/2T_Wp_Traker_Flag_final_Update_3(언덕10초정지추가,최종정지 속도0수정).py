@@ -387,6 +387,13 @@ def publish_all(event, one_based=True):
     no_gps = (now - last_fix_time) > rospy.get_param('~gps_timeout_sec', GPS_TIMEOUT_SEC)
 
 
+
+
+    # 홀드 종료 체크
+    if hold_active and now >= hold_until:
+        hold_active = False
+        rospy.loginfo(f"[flag] HOLD done ({hold_reason})")
+
     # 최종 정지 래치가 켜졌으면 무조건 0,0
     if no_gps or hold_active or final_stop_latched:
         v_out_int = 0
@@ -395,18 +402,13 @@ def publish_all(event, one_based=True):
         v_out_int = int(speed_cmd_current_code)
         steer_out = float(latest_filtered_angle)
 
-    # 홀드 종료 체크
-    if hold_active and now >= hold_until:
-        hold_active = False
-        rospy.loginfo(f"[flag] HOLD done ({hold_reason})")
-
-    # 퍼블리시는 Float32지만 값은 정수로 보냄
-    if no_gps or hold_active:
-        v_out_int = 0
-        steer_out = 0.0
-    else:
-        v_out_int = int(speed_cmd_current_code)
-        steer_out = float(latest_filtered_angle)
+    # # 퍼블리시는 Float32지만 값은 정수로 보냄
+    # if no_gps or hold_active:
+    #     v_out_int = 0
+    #     steer_out = 0.0
+    # else:
+    #     v_out_int = int(speed_cmd_current_code)
+    #     steer_out = float(latest_filtered_angle)
 
     if pub_speed: pub_speed.publish(Float32(float(v_out_int)))
     if pub_steer: pub_steer.publish(Float32(steer_out))
