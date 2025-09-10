@@ -103,7 +103,7 @@ FLAG_DEFS = [
     # 언덕 구간 예시(필요 시 start/end 조정하세요)
     {'name': 'GRADE_UP', 'start': 14, 'end': 14,
      'radius_scale': 0.3, 'lookahead_scale': 0.95,
-     'speed_code': None, 'speed_cap': None, 'step_per_loop': 4,
+     'speed_code': None, 'speed_cap': None, 'step_per_loop': 2,
      'stop_on_hit': True, 'stop_duration_sec': None},  # ← None이면 STOP_FLAG_STAY_SEC 사용
 
     # # 우회전 직각 구간: 정밀 제어 위해 속도 제한 예시
@@ -114,7 +114,7 @@ FLAG_DEFS = [
     # 정지 구간 예시 (말그대로 정지. 경로 최종 도착지점에 사용함)
     {'name': 'STOP', 'start': 20, 'end': 21,
      'radius_scale': 0.5, 'lookahead_scale': 1.0,
-     'speed_code': 0, 'speed_cap': 0, 'step_per_loop': 2},
+     'speed_code': 0, 'speed_cap': 0, 'step_per_loop': 1},
 
     # 직선 가속 구간 예시
     {'name': 'STRAIGHT_FAST', 'start': 1, 'end': 10,
@@ -654,7 +654,12 @@ def main():
                     if active_name == "STOP":
                         base_speed_code_param = 0
                         try:
-                            rospy.set_param('~speed_code', 0)  # 런타임 파라미터까지 반영
+                            #rospy.set_param('~speed_code', 0)  # 런타임 파라미터까지 반영
+                            final_stop_latched = True
+                            speed_desired_code = 0
+                            speed_cmd_current_code = 0
+                            base_speed_code_param = 0
+
                         except Exception:
                             pass
                         rospy.loginfo("[STOP] Final stop zone reached → base_speed set to 0")
