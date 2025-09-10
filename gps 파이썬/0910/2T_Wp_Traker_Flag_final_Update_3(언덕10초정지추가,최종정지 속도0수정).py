@@ -386,9 +386,6 @@ def publish_all(event, one_based=True):
     now = time.time()
     no_gps = (now - last_fix_time) > rospy.get_param('~gps_timeout_sec', GPS_TIMEOUT_SEC)
 
-
-
-
     # 홀드 종료 체크
     if hold_active and now >= hold_until:
         hold_active = False
