@@ -1,0 +1,517 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import csv
+import math
+import time
+import signal
+from collections import deque
+
+import rospy
+import rospkg
+from sensor_msgs.msg import NavSatFix
+from std_msgs.msg import Float32, String, Int32
+
+import matplotlib
+# GUI 사용 여부를 rosparam으로 제어할 수 있게(기본: True)
+_ENABLE_GUI_DEFAULT = True
+try:
+    _ENABLE_GUI = rospy.get_param('~enable_gui', _ENABLE_GUI_DEFAULT)
+except Exception:
+    _ENABLE_GUI = _ENABLE_GUI_DEFAULT
+
+if _ENABLE_GUI:
+    try:
+        matplotlib.use('Qt5Agg')
+    except Exception:
+        try:
+            matplotlib.use('TkAgg')
+        except Exception:
+            matplotlib.use('Agg')
+else:
+    matplotlib.use('Agg')
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+import matplotlib.animation as animation
+
+import geopy.distance
+import pandas as pd
+import numpy as np
+from queue import Queue
+
+# ──────────────────────────────────────────────────────────────────
+# 기본 파라미터 (필요시 rosparam으로 덮어쓰기)
+# ──────────────────────────────────────────────────────────────────
+WAYPOINT_SPACING   = 2.5         # m
+TARGET_RADIUS_END  = 2.0         # m
+MAX_STEER_DEG      = 20.0        # deg
+SIGN_CONVENTION    = -1.0
+
+LOOKAHEAD_MIN      = 3.2         # m
+LOOKAHEAD_MAX      = 4.0         # m
+LOOKAHEAD_K        = 0.2         # m per (m/s)
+
+LPF_FC_HZ          = 0.8         # Hz (조향 LPF)
+SPEED_BUF_LEN      = 10
+MAX_JITTER_SPEED   = 4.0         # m/s
+MIN_MOVE_FOR_HEADING = 0.05      # m
+
+FS_DEFAULT         = 20.0        # 퍼블리시/갱신 Hz
+GPS_TIMEOUT_SEC    = 1.0         # 최근 fix 없을 때 안전정지
+
+# ── 속도 명령 상수 ──
+SPEED_FORCE_CODE = 3          # 예: 1 또는 2로 고정. rosparam 무시
+# SPEED_FORCE_CODE = None
+SPEED_CAP_CODE_DEFAULT = 6    # 코드 상한(예: 6)
+
+# 시각화 옵션
+ANNOTATE_WAYPOINT_INDEX = True
+DRAW_WAYPOINT_CIRCLES   = True
+
+# 퍼블리시 토픽
+TOPIC_SPEED_CMD    = '/vehicle/speed_cmd'
+TOPIC_STEER_CMD    = '/vehicle/steer_cmd'
+TOPIC_RTK_STATUS   = '/rtk/status'
+TOPIC_WP_INDEX     = '/tracker/wp_index'
+
+# u-blox RELPOSNED(선택)
+_HAVE_RELPOSNED = False
+try:
+    from ublox_msgs.msg import NavRELPOSNED9 as NavRELPOSNED
+    _HAVE_RELPOSNED = True
+except Exception:
+    try:
+        from ublox_msgs.msg import NavRELPOSNED
+        _HAVE_RELPOSNED = True
+    except Exception:
+        _HAVE_RELPOSNED = False
+
+# ──────────────────────────────────────────────────────────────────
+# 전역 상태
+# ──────────────────────────────────────────────────────────────────
+gps_queue = Queue()
+latest_filtered_angle = 0.0
+pos_buf   = deque(maxlen=SPEED_BUF_LEN*2)
+speed_buf = deque(maxlen=SPEED_BUF_LEN)
+
+pub_speed = None
+pub_steer = None
+pub_rtk   = None
+pub_wpidx = None
+
+rtk_status_txt = "NONE"
+last_fix_time  = 0.0
+
+wp_index_active = -1
+last_pub_speed_code = 0.0
+
+log_csv_path = None
+_last_log_wall = 0.0
+
+# 플롯 핸들(애니메이션용)
+_fig = None
+_ax = None
+_ax_info = None
+_live_line = None
+_current_pt = None
+_target_line = None
+_hud_text = None
+_spaced_x = None
+_spaced_y = None
+_prev_Ld = LOOKAHEAD_MIN
+_nearest_idx_prev = 0
+_last_heading_vec = None
+_to_xy = None
+_df = None
+fs = FS_DEFAULT
+
+def _default_paths():
+    try:
+        pkg_path = rospkg.RosPack().get_path('rtk_waypoint_tracker')
+    except Exception:
+        pkg_path = os.path.expanduser('~/catkin_ws/src/rtk_waypoint_tracker')
+    waypoint_csv = os.path.join(pkg_path, 'config', 'raw_track_latlon_6.csv')
+    logs_dir     = os.path.join(pkg_path, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    log_csv      = os.path.join(logs_dir, f"waypoint_log_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    return waypoint_csv, log_csv
+
+WAYPOINT_CSV_DEFAULT, LOG_CSV_DEFAULT = _default_paths()
+
+# ──────────────────────────────────────────────────────────────────
+# 좌표/웨이포인트 유틸
+# ──────────────────────────────────────────────────────────────────
+def latlon_to_xy_fn(ref_lat, ref_lon):
+    def _to_xy(lat, lon):
+        northing = geopy.distance.geodesic((ref_lat, ref_lon), (lat, ref_lon)).meters
+        easting  = geopy.distance.geodesic((ref_lat, ref_lon), (ref_lat, lon)).meters
+        if lat < ref_lat: northing *= -1
+        if lon < ref_lon: easting  *= -1
+        return easting, northing
+    return _to_xy
+
+def euclidean_dist(p1, p2):
+    return np.linalg.norm(np.array(p1) - np.array(p2))
+
+def generate_waypoints_along_path(path, spacing=3.0):
+    if len(path) < 2:
+        return path
+    new_points = [path[0]]
+    dist_accum = 0.0
+    last_point = np.array(path[0], dtype=float)
+    for i in range(1, len(path)):
+        current_point = np.array(path[i], dtype=float)
+        segment = current_point - last_point
+        seg_len = np.linalg.norm(segment)
+        while dist_accum + seg_len >= spacing:
+            remain = spacing - dist_accum
+            direction = segment / seg_len
+            new_point = last_point + direction * remain
+            new_points.append(tuple(new_point))
+            last_point = new_point
+            segment = current_point - last_point
+            seg_len = np.linalg.norm(segment)
+            dist_accum = 0.0
+        dist_accum += seg_len
+        last_point = current_point
+    if euclidean_dist(new_points[-1], path[-1]) > 1e-6:
+        new_points.append(path[-1])
+    return new_points
+
+def wrap_deg(a): return (a + 180.0) % 360.0 - 180.0
+
+def angle_between(v1, v2):
+    v1 = np.array(v1, dtype=float); v2 = np.array(v2, dtype=float)
+    n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+    if n1 == 0.0 or n2 == 0.0: return 0.0
+    dot = np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)
+    ang = math.degrees(math.acos(dot))
+    if v1[0]*v2[1] - v1[1]*v2[0] < 0: ang = -ang
+    return ang
+
+class AngleLPF:
+    def __init__(self, fc_hz=3.0, init_deg=0.0):
+        self.fc = fc_hz
+        self.y = init_deg
+        self.t_last = None
+    def update(self, target_deg, t_sec):
+        if self.t_last is None:
+            self.t_last = t_sec
+            self.y = target_deg
+            return self.y
+        dt = max(1e-3, t_sec - self.t_last)
+        tau = 1.0 / (2.0 * math.pi * self.fc)
+        alpha = dt / (tau + dt)
+        err = wrap_deg(target_deg - self.y)
+        self.y = wrap_deg(self.y + alpha * err)
+        self.t_last = t_sec
+        return self.y
+
+def find_nearest_index(x, y, xs, ys, start_idx, window_ahead=60, window_back=10):
+    n = len(xs)
+    i0, i1 = max(0, start_idx - window_back), min(n - 1, start_idx + window_ahead)
+    sub_x, sub_y = np.array(xs[i0:i1+1]), np.array(ys[i0:i1+1])
+    d2 = (sub_x - x)**2 + (sub_y - y)**2
+    return i0 + int(np.argmin(d2))
+
+def target_index_from_lookahead(nearest_idx, Ld, spacing, n):
+    steps = max(1, int(math.ceil(Ld / max(1e-6, spacing))))
+    return min(n - 1, nearest_idx + steps)
+
+def nearest_in_radius_index(x, y, xs, ys, radius):
+    xs = np.asarray(xs); ys = np.asarray(ys)
+    d2 = (xs - x)**2 + (ys - y)**2
+    i = int(np.argmin(d2))
+    if math.hypot(xs[i]-x, ys[i]-y) <= radius:
+        return i
+    return -1
+
+# ──────────────────────────────────────────────────────────────────
+# ROS 콜백/퍼블리시
+# ──────────────────────────────────────────────────────────────────
+def gps_callback(data: NavSatFix):
+    global last_fix_time
+    if hasattr(data, "status") and getattr(data.status, "status", 0) < 0:
+        return
+    lat, lon = float(data.latitude), float(data.longitude)
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return
+    stamp = data.header.stamp.to_sec() if getattr(data, 'header', None) and data.header.stamp else rospy.Time.now().to_sec()
+    gps_queue.put((lat, lon, stamp))
+    last_fix_time = time.time()
+
+def _cb_relpos(msg):
+    global rtk_status_txt
+    try:
+        carr_soln = int((int(msg.flags) >> 3) & 0x3)
+        if carr_soln == 2:   rtk_status_txt = "FIX"
+        elif carr_soln == 1: rtk_status_txt = "FLOAT"
+        else:                rtk_status_txt = "NONE"
+    except Exception:
+        rtk_status_txt = "NONE"
+
+def publish_all(event, speed_code_default=1, one_based=True):
+    global last_pub_speed_code
+    now = time.time()
+    no_gps = (now - last_fix_time) > rospy.get_param('~gps_timeout_sec', GPS_TIMEOUT_SEC)
+
+    if SPEED_FORCE_CODE is not None:
+        code = int(SPEED_FORCE_CODE); cap = int(SPEED_CAP_CODE_DEFAULT)
+    else:
+        code = int(rospy.get_param('~speed_code', speed_code_default))
+        cap  = int(rospy.get_param('~speed_cap_code', SPEED_CAP_CODE_DEFAULT))
+    code = max(0, min(code, cap))
+
+    v_out = 0.0 if no_gps else float(code)
+    steer_out = 0.0 if no_gps else float(latest_filtered_angle)
+
+    if pub_speed: pub_speed.publish(Float32(v_out))
+    if pub_steer: pub_steer.publish(Float32(steer_out))
+    if pub_rtk:   pub_rtk.publish(String(rtk_status_txt))
+    if pub_wpidx:
+        if wp_index_active >= 0:
+            idx_pub = (wp_index_active + 1) if one_based else wp_index_active
+        else:
+            idx_pub = 0
+        pub_wpidx.publish(Int32(int(idx_pub)))
+
+    last_pub_speed_code = v_out
+
+def _on_shutdown():
+    try:
+        if pub_speed: pub_speed.publish(Float32(0.0))
+        if pub_steer: pub_steer.publish(Float32(0.0))
+    except Exception:
+        pass
+
+# ──────────────────────────────────────────────────────────────────
+# 애니메이션 업데이트 함수 (GUI 이벤트 루프가 호출)
+# ──────────────────────────────────────────────────────────────────
+def _anim_update(_frame):
+    """GUI 타이머마다 호출되어 화면 갱신 + 내부 상태 업데이트"""
+    global latest_filtered_angle, wp_index_active
+    global _prev_Ld, _nearest_idx_prev, _last_heading_vec, _spaced_x, _spaced_y, _to_xy
+
+    updated = False
+    speed_mps = 0.0
+    lat = lon = float('nan')
+    x = y = float('nan')
+
+    lpf = _anim_update.lpf  # 유지형 필터
+
+    while not gps_queue.empty():
+        lat, lon, tsec = gps_queue.get()
+        x, y = _to_xy(lat, lon)
+        updated = True
+
+        # 속도 추정
+        if len(pos_buf) > 0:
+            t_prev, x_prev, y_prev = pos_buf[-1]
+            dt = max(1e-3, tsec - t_prev)
+            d  = math.hypot(x - x_prev, y - y_prev)
+            inst_v = d / dt
+            if inst_v > MAX_JITTER_SPEED:
+                continue
+            speed_buf.append(inst_v)
+        pos_buf.append((tsec, x, y))
+        speed_mps = float(np.median(speed_buf)) if speed_buf else 0.0
+
+        # 타겟 인덱스(Ld)
+        nearest_idx = find_nearest_index(x, y, _spaced_x, _spaced_y, _nearest_idx_prev, 80, 15)
+        _nearest_idx_prev = nearest_idx
+        Ld_target = max(LOOKAHEAD_MIN, min(LOOKAHEAD_MAX, LOOKAHEAD_MIN + LOOKAHEAD_K * speed_mps))
+        Ld = _prev_Ld + 0.2 * (Ld_target - _prev_Ld)
+        _prev_Ld = Ld
+
+        tgt_idx = target_index_from_lookahead(nearest_idx, Ld, WAYPOINT_SPACING, len(_spaced_x))
+        tx, ty = _spaced_x[tgt_idx], _spaced_y[tgt_idx]
+        _target_line.set_data([x, tx], [y, ty])
+
+        # 반경 내 인덱스 판정
+        wp_index_active = nearest_in_radius_index(x, y, _spaced_x, _spaced_y, TARGET_RADIUS_END)
+
+        # 헤딩
+        heading_vec = None
+        for k in range(2, min(len(pos_buf), 5)+1):
+            t0, x0, y0 = pos_buf[-k]
+            if math.hypot(x - x0, y - y0) >= MIN_MOVE_FOR_HEADING:
+                heading_vec = (x - x0, y - y0)
+                break
+        if heading_vec is not None:
+            _last_heading_vec = heading_vec
+        elif _last_heading_vec is None:
+            continue
+
+        # 조향 계산 + 동적 LPF
+        target_vec = (tx - x, ty - y)
+        raw_angle = angle_between(_last_heading_vec, target_vec)
+        base_fc = LPF_FC_HZ
+        lpf.fc = min(2.0, base_fc + 0.5) if abs(raw_angle) > 10 else base_fc
+        filt_angle = max(-MAX_STEER_DEG, min(MAX_STEER_DEG, lpf.update(raw_angle, tsec)))
+        latest_filtered_angle = SIGN_CONVENTION * filt_angle
+
+        # 시각화 갱신
+        if _ENABLE_GUI:
+            _live_line.set_data([p[1] for p in pos_buf], [p[2] for p in pos_buf])
+            _current_pt.set_data([x], [y])
+
+            heading_deg = (math.degrees(math.atan2(_last_heading_vec[1], _last_heading_vec[0]))
+                           if _last_heading_vec is not None else float('nan'))
+            wp_display = (wp_index_active + 1) if (wp_index_active >= 0) else 0
+
+            _ax_info.clear(); _ax_info.axis('off')
+            status = [
+                f"Meas v: {speed_mps:.2f} m/s",
+                f"Pub v(code): {last_pub_speed_code:.1f}",
+                f"Steer: {latest_filtered_angle:+.1f}°",
+                f"Heading: {heading_deg:.1f}°",
+                f"WP(in-radius): {wp_display}",
+                f"RTK: {rtk_status_txt}"
+            ]
+            _ax_info.text(0.02, 0.5, " | ".join(status), fontsize=11, va='center')
+
+            _hud_text.set_text(
+                f"pub_v={last_pub_speed_code:.1f} | meas_v={speed_mps:.2f} m/s | "
+                f"steer={latest_filtered_angle:+.1f}° | WP={wp_display}"
+            )
+
+        # 로그 (0.5s)
+        noww = time.time()
+        if log_csv_path and (noww - _last_log_wall > 0.5):
+            try:
+                new = not os.path.exists(log_csv_path)
+                os.makedirs(os.path.dirname(log_csv_path), exist_ok=True)
+                with open(log_csv_path, 'a', newline='') as f:
+                    w = csv.writer(f)
+                    if new:
+                        w.writerow(['time','lat','lon','x','y',
+                                    'wp_in_radius(1based)','tx','ty',
+                                    'steer_deg','meas_speed_mps','pub_v_code','Ld','rtk'])
+                    wp_display = (wp_index_active + 1) if (wp_index_active >= 0) else 0
+                    w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                                f"{lat:.7f}", f"{lon:.7f}", f"{x:.3f}", f"{y:.3f}",
+                                wp_display, f"{tx:.3f}", f"{ty:.3f}",
+                                f"{latest_filtered_angle:.2f}", f"{speed_mps:.2f}",
+                                f"{last_pub_speed_code:.1f}", f"{Ld:.2f}", rtk_status_txt])
+                globals()['_last_log_wall'] = noww
+            except Exception as e:
+                rospy.logwarn(f"[tracker] log write failed: {e}")
+
+        rospy.loginfo_throttle(
+            0.5,
+            f"WP(in-radius)={(wp_index_active+1) if wp_index_active>=0 else 0} | "
+            f"meas_v={speed_mps:.2f} m/s | pub_v={last_pub_speed_code:.1f} | "
+            f"Ld={_prev_Ld:.2f} | steer={latest_filtered_angle:+.2f} deg | RTK={rtk_status_txt}"
+        )
+
+    # blit=False라 반환값 없어도 됨
+    return
+
+# 필터 객체를 함수 속성으로 보관(애니메이션 사이에 유지)
+_anim_update.lpf = AngleLPF(fc_hz=LPF_FC_HZ)
+
+def _on_close(_evt):
+    """창 닫을 때 ROS 깔끔 종료 → 터미널 즉시 복귀"""
+    rospy.signal_shutdown("Figure closed by user")
+
+# ──────────────────────────────────────────────────────────────────
+# 메인
+# ──────────────────────────────────────────────────────────────────
+def main():
+    global pub_speed, pub_steer, pub_rtk, pub_wpidx
+    global log_csv_path, _spaced_x, _spaced_y, _to_xy, _df
+    global _fig, _ax, _ax_info, _live_line, _current_pt, _target_line, _hud_text
+    global fs
+
+    rospy.init_node('rtk_waypoint_tracker', anonymous=False)
+    rospy.on_shutdown(_on_shutdown)
+
+    # Qt가 SIGINT를 먹는 문제 방지 → Ctrl+C 정상 동작
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    waypoint_csv = rospy.get_param('~waypoint_csv', WAYPOINT_CSV_DEFAULT)
+    log_csv_path = rospy.get_param('~log_csv',      LOG_CSV_DEFAULT)
+    fs           = float(rospy.get_param('~fs',     FS_DEFAULT))
+    one_based    = bool(rospy.get_param('~wp_index_one_based', True))
+    ublox_ns     = rospy.get_param('~ublox_ns', '/gps1')
+    fix_topic    = rospy.get_param('~fix_topic',    ublox_ns + '/fix')
+    relpos_topic = rospy.get_param('~relpos_topic', ublox_ns + '/navrelposned')
+
+    # 퍼블리셔/구독자
+    pub_speed = rospy.Publisher(TOPIC_SPEED_CMD, Float32, queue_size=10)
+    pub_steer = rospy.Publisher(TOPIC_STEER_CMD, Float32, queue_size=10)
+    pub_rtk   = rospy.Publisher(TOPIC_RTK_STATUS, String,  queue_size=10)
+    pub_wpidx = rospy.Publisher(TOPIC_WP_INDEX,   Int32,   queue_size=10)
+
+    rospy.Subscriber(fix_topic, NavSatFix, gps_callback, queue_size=100)
+    if _HAVE_RELPOSNED:
+        rospy.Subscriber(relpos_topic, NavRELPOSNED, _cb_relpos, queue_size=50)
+    rospy.loginfo("[tracker] subscribe: fix=%s, relpos=%s(%s)", fix_topic, relpos_topic, "ON" if _HAVE_RELPOSNED else "OFF")
+
+    # CSV 로드
+    if not os.path.exists(waypoint_csv):
+        rospy.logerr("[tracker] waypoint csv not found: %s", waypoint_csv)
+        return
+
+    _df = pd.read_csv(waypoint_csv)
+    ref_lat = float(_df['Lat'][0]); ref_lon = float(_df['Lon'][0])
+    _to_xy = latlon_to_xy_fn(ref_lat, ref_lon)
+
+    csv_coords = [_to_xy(row['Lat'], row['Lon']) for _, row in _df.iterrows()]
+    original_path = list(csv_coords)
+    spaced_waypoints = generate_waypoints_along_path(original_path, spacing=WAYPOINT_SPACING)
+    _spaced_x, _spaced_y = tuple(zip(*spaced_waypoints))
+
+    # ── 플롯 구성 ──
+    if _ENABLE_GUI:
+        _fig = plt.figure(figsize=(7.8, 9.0))
+        gs = _fig.add_gridspec(2, 1, height_ratios=[4, 1])
+        _ax  = _fig.add_subplot(gs[0, 0])
+        _ax_info = _fig.add_subplot(gs[1, 0]); _ax_info.axis('off')
+
+        _ax.plot([p[0] for p in csv_coords], [p[1] for p in csv_coords], 'g-', label='CSV Path')
+        _ax.plot(_spaced_x, _spaced_y, 'b.-', markersize=3, label=f'{WAYPOINT_SPACING:.0f}m Waypoints')
+        _live_line,   = _ax.plot([], [], 'r-', linewidth=1, label='Live GPS')
+        _current_pt,  = _ax.plot([], [], 'ro', label='Current')
+        _target_line, = _ax.plot([], [], 'g--', linewidth=1, label='Target Line')
+        _ax.axis('equal'); _ax.grid(True); _ax.legend()
+
+        _hud_text = _ax.text(0.98, 0.02, "",
+                             transform=_ax.transAxes, ha='right', va='bottom',
+                             fontsize=9, bbox=dict(fc='white', alpha=0.75, ec='0.5'))
+
+        minx = min(min([p[0] for p in csv_coords]), min(_spaced_x))-10
+        maxx = max(max([p[0] for p in csv_coords]), max(_spaced_x))+10
+        miny = min(min([p[1] for p in csv_coords]), min(_spaced_y))-10
+        maxy = max(max([p[1] for p in csv_coords]), max(_spaced_y))+10
+        _ax.set_xlim(minx, maxx); _ax.set_ylim(miny, maxy)
+
+        if ANNOTATE_WAYPOINT_INDEX or DRAW_WAYPOINT_CIRCLES:
+            for idx, (xw, yw) in enumerate(zip(_spaced_x, _spaced_y), 1):
+                if ANNOTATE_WAYPOINT_INDEX:
+                    _ax.text(xw, yw, str(idx), fontsize=8, ha='center', va='center', color='black')
+                if DRAW_WAYPOINT_CIRCLES:
+                    _ax.add_patch(Circle((xw, yw), TARGET_RADIUS_END, color='blue', fill=False, linestyle='--', alpha=0.5))
+
+        # 창 닫힘 시 ROS 종료
+        _fig.canvas.mpl_connect('close_event', _on_close)
+
+    # 퍼블리시 타이머
+    rospy.Timer(rospy.Duration(1.0/max(1.0, fs)), lambda e: publish_all(e, speed_code_default=1, one_based=True))
+
+    # 애니메이션 타이머 시작
+    if _ENABLE_GUI:
+        interval_ms = int(1000.0 / max(1.0, fs))
+        animation.FuncAnimation(_fig, _anim_update, interval=interval_ms, blit=False)
+        plt.show()   # 여기서 블록되지만, 창 닫으면 _on_close → 깔끔히 종료됨
+        # plt.show() 이후에는 ROS가 종료되어 main()을 빠져나감
+    else:
+        # 헤드리스 모드: ROS 이벤트 루프만
+        rospy.loginfo("[tracker] Headless mode (no GUI).")
+        rospy.Timer(rospy.Duration(1.0/max(1.0, fs)), lambda e: _anim_update(None))
+        rospy.spin()
+
+if __name__ == '__main__':
+    main()
