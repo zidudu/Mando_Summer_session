@@ -5,6 +5,7 @@ plot_current_vs_waypoints_flags_with_names.py
 - 로그 CSV (lat,lon) 과 웨이포인트 CSV (Lat,Lon or x,y)를 비교/시각화
 - 플래그 구간별로 다른 waypoint spacing / radius_scale 지원
 - 범례 및 통계 박스에 로그 / wpt CSV 파일명 표시
+- (추가) 각 웨이포인트에 대해 구간별 원 반경 시각화
 """
 import os
 import re
@@ -26,9 +27,9 @@ from matplotlib.patches import Circle
 import geopy.distance
 
 # ----------------- 기본 경로 (필요 시 수정) -----------------
-DEFAULT_LOG_CSV = "/home/jigu/catkin_ws/src/rtk_waypoint_tracker/logs/waypoint_log_20250908_175635.csv"
-DEFAULT_WPT_CSV = "/home/jigu/catkin_ws/src/rtk_waypoint_tracker/config/raw_track_latlon_6.csv"
-DEFAULT_TRACKER_PY = "/home/jigu/catkin_ws/src/rtk_waypoint_tracker/src/waypoint_tracker_node.py"
+DEFAULT_LOG_CSV = "/home/jigu/catkin_ws/src/rtk_waypoint_tracker/logs/waypoint_log_20250911_031007.csv"
+DEFAULT_WPT_CSV = "/home/jigu/catkin_ws/src/rtk_waypoint_tracker/config/raw_track_latlon_14_s.csv"
+DEFAULT_TRACKER_PY = "/home/jigu/catkin_ws/src/rtk_waypoint_tracker/src/waypoint_tracker_node_Flag.py"
 OUT_PNG = "waypoint_vs_log_flags_with_names.png"
 
 # 전역 기본값
@@ -301,6 +302,30 @@ def main(args):
     ax.scatter(spaced_x_all[~visited], spaced_y_all[~visited], c='navy', s=18, marker='.', label='WP (not visited)')
     ax.scatter(spaced_x_all[visited], spaced_y_all[visited], c='limegreen', s=46, marker='o', label='WP (visited)')
 
+    # --- 여기서: 모든 웨이포인트에 대해 '유효 반경(eff_r)' 원을 그림 (구간별 scale 적용) ---
+    label_added_for_zone = {}  # zid -> bool (범례용 라벨 1회만 추가)
+    label_added_for_zone[-1] = False  # 전역 반경(구간에 속하지 않는 WP)
+    for i, (xw, yw) in enumerate(zip(spaced_x_all, spaced_y_all)):
+        zid = int(idx_to_zone[i])
+        if zid >= 0:
+            z = flag_zones[zid]
+            color = cmap(zid % 10)
+            eff_r = TARGET_RADIUS_END * z.get('radius_scale', 1.0)
+            label = None
+            if not label_added_for_zone.get(zid, False):
+                label = f"{z['name']} radius x{z.get('radius_scale',1.0):.2f}"
+                label_added_for_zone[zid] = True
+        else:
+            color = 'gray'
+            eff_r = TARGET_RADIUS_END
+            label = None
+            if not label_added_for_zone.get(-1, False):
+                label = f"Global radius ({TARGET_RADIUS_END:.2f} m)"
+                label_added_for_zone[-1] = True
+        c = Circle((xw, yw), eff_r, color=color, fill=False, linestyle='-', alpha=0.25, linewidth=0.8, label=label)
+        ax.add_patch(c)
+    # ------------------------------------------------------------------------------
+
     # stats text (include basenames)
     stats_lines = []
     stats_lines.append(f"Log: {log_basename}   Waypoint: {wpt_basename}")
@@ -313,7 +338,7 @@ def main(args):
 
     ax.set_xlabel("X [m] (local)")
     ax.set_ylabel("Y [m] (local)")
-    ax.set_title("Waypoint vs Log (flag-aware) — names shown in legend/stat box")
+    ax.set_title("Waypoint vs Log (flag-aware) — names & per-WP radius shown")
     ax.axis('equal'); ax.grid(True)
     ax.legend(loc='upper left', fontsize=9)
 
