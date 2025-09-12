@@ -339,4 +339,60 @@ def main():
         rospy.Subscriber(rel_topic, _RELP, _cb_relpos, queue_size=50)
 
     # CSV 로드
-    if not os.path.exists(w
+    if not os.path.exists(waypoint_csv):
+        rospy.logerr("[return] waypoint csv not found: %s", waypoint_csv); return
+    _df=pd.read_csv(waypoint_csv)
+    ref_lat=float(_df['Lat'][0]); ref_lon=float(_df['Lon'][0])
+    global _to_xy; _to_xy=latlon_to_xy_fn(ref_lat,ref_lon)
+    csv_xy=[_to_xy(r['Lat'],r['Lon']) for _,r in _df.iterrows()]
+    spaced=generate_waypoints_along_path(csv_xy, spacing=WAYPOINT_SPACING)
+    global _spaced_x,_spaced_y; _spaced_x,_spaced_y=tuple(zip(*spaced))
+
+    # 플롯 구성
+    if _ENABLE_GUI and _HAVE_MPL:
+        global _fig,_ax,_ax_info,_live_line,_current_pt,_target_line,_hud_text
+        _fig=plt.figure(figsize=(7.8,9.0))
+        gs=_fig.add_gridspec(2,1,height_ratios=[4,1])
+        _ax=_fig.add_subplot(gs[0,0])
+        _ax_info=_fig.add_subplot(gs[1,0]); _ax_info.axis('off')
+
+        _ax.plot([p[0] for p in csv_xy], [p[1] for p in csv_xy], 'g-',  label='CSV Path')
+        _ax.plot(_spaced_x,_spaced_y,'b.-',markersize=3,           label=f'{WAYPOINT_SPACING:.0f}m Waypoints')
+        _live_line,  = _ax.plot([],[],'r-', linewidth=1, label='Live GPS')
+        _current_pt, = _ax.plot([],[],'ro',              label='Current')
+        _target_line,= _ax.plot([],[],'m--', linewidth=1, label='PP Target')
+        _ax.axis('equal'); _ax.grid(True); _ax.legend()
+
+        _hud_text = _ax.text(0.98,0.02,"", transform=_ax.transAxes, ha='right', va='bottom',
+                             fontsize=9, bbox=dict(fc='white', alpha=0.75, ec='0.5'))
+
+        minx=min(min([p[0] for p in csv_xy]), min(_spaced_x))-10
+        maxx=max(max([p[0] for p in csv_xy]), max(_spaced_x))+10
+        miny=min(min([p[1] for p in csv_xy]), min(_spaced_y))-10
+        maxy=max(max([p[1] for p in csv_xy]), max(_spaced_y))+10
+        _ax.set_xlim(minx,maxx); _ax.set_ylim(miny,maxy)
+
+        if annotate_wp or draw_circ:
+            for i,(xw,yw) in enumerate(zip(_spaced_x,_spaced_y),1):
+                if annotate_wp:
+                    _ax.text(xw,yw,str(i),fontsize=7,ha='center',va='center',color='black')
+                if draw_circ:
+                    _ax.add_patch(Circle((xw,yw), TARGET_RADIUS_END, color='blue', fill=False, linestyle='--', alpha=0.35))
+
+        _fig.canvas.mpl_connect('close_event', _on_close)
+
+    # 퍼블리시 타이머
+    rospy.Timer(rospy.Duration(1.0/max(1.0,fs)), publish_all)
+
+    # 애니메이션/헤드리스
+    if _ENABLE_GUI and _HAVE_MPL:
+        interval_ms=int(1000.0/max(1.0,fs))
+        animation.FuncAnimation(_fig, _anim_update, interval=interval_ms, blit=False)
+        plt.show()
+    else:
+        rospy.loginfo("[return] Headless mode")
+        rospy.Timer(rospy.Duration(1.0/max(1.0,fs)), lambda e: _anim_update(None))
+        rospy.spin()
+
+if __name__=='__main__':
+    main()
