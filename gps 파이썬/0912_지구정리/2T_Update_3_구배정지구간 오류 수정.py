@@ -73,7 +73,7 @@ TOPIC_SPEED_CMD   = '/gps/speed_cmd'     # Float32
 TOPIC_STEER_CMD   = '/gps/steer_cmd'     # Float32 (deg)
 TOPIC_RTK_STATUS  = '/gps/rtk_status'    # String ("FIX"/"FLOAT"/"NONE")
 TOPIC_WP_INDEX    = '/gps/wp_index'      # Int32 (1-based, 반경 밖=0)
-TOPIC_GRADE_UP_ON = '/gps/GRADE_UP_ON'   # Int32 (0/1)  ★ 추가
+TOPIC_GRADE_UP_ON = '/gps/GRADEUP_ON'   # Int32 (0/1)  ★ 추가
 
 # u-blox 옵셔널 의존성 (RTK 상태)
 _HAVE_RELPOSNED = False
@@ -91,29 +91,49 @@ except Exception:
 # 플래그(구간) 정의
 # ──────────────────────────────────────────────────────────────────
 FLAG_DEFS = [
-    # 언덕(GRADE) — 해당 원에 들어오면 1회 3초 정지, 구간에 있는 동안 grade_topic=1 유지
-    {'name': 'GRADE_UP', 'start': 14, 'end': 14,
-     'radius_scale': 0.3, 'lookahead_scale': 0.95,
-     'speed_code': None, 'speed_cap': None, 'step_per_loop': 2,
-     'stop_on_hit': True, 'stop_duration_sec': None,
+    # 구배 시작
+    {'name': 'GRADE_START', 'start': 4, 'end': 5,
+     'radius_scale': 1.0, 'lookahead_scale': 0.95,
+     'speed_code': 5, 'speed_cap': 7, 'step_per_loop': 2,
+     'stop_on_hit': False, 'stop_duration_sec': None,
      'grade_topic': 1},  # ★ 추가
 
-    # 정지 구간(최종 도착 등)
-    {'name': 'STOP', 'start': 20, 'end': 21,
-     'radius_scale': 0.5, 'lookahead_scale': 1.0,
-     'speed_code': 0, 'speed_cap': 0, 'step_per_loop': 1, 'sequential': False},
-
-    # 직선 가속 예시
-    {'name': 'STRAIGHT_FAST', 'start': 1, 'end': 10,
-     'radius_scale': 1.0, 'lookahead_scale': 1.0,
-     'speed_code': 8, 'speed_cap': 10, 'step_per_loop': 2,
-     'sequential': False},
-
-    # 교차로: 순차 인덱스
-    {'name': 'INTERSECTION_1', 'start': 30, 'end': 40,
-     'radius_scale': 1.0, 'lookahead_scale': 1.0,
+    # 언덕(GRADE) — 해당 원에 들어오면 1회 3초 정지, 구간에 있는 동안 grade_topic=1 유지
+    {'name': 'GRADE_UP', 'start': 6, 'end': 6,
+     'radius_scale': 1.0, 'lookahead_scale': 0.95,
      'speed_code': None, 'speed_cap': None, 'step_per_loop': 2,
-     'sequential': True}
+     'stop_on_hit': True, 'stop_duration_sec': 3,
+     'grade_topic': 1},  # ★ 추가
+
+    {'name': 'GRADE_GO', 'start': 7, 'end': 9,
+     'radius_scale': 1.0, 'lookahead_scale': 0.95,
+     'speed_code': 5, 'speed_cap': 7, 'step_per_loop': 2,
+     'stop_on_hit': False, 'stop_duration_sec': None,
+     'grade_topic': 1},  # ★ 추가
+
+    {'name': 'GRADE_END', 'start': 10, 'end': 11,
+     'radius_scale': 1.0, 'lookahead_scale': 0.95,
+     'speed_code': 5, 'speed_cap': 7, 'step_per_loop': 2,
+     'stop_on_hit': False, 'stop_duration_sec': None,
+     'grade_topic': 0},  # ★ 추가
+
+
+    # # 정지 구간(최종 도착 등)
+    # {'name': 'STOP', 'start': 20, 'end': 21,
+    #  'radius_scale': 0.5, 'lookahead_scale': 1.0,
+    #  'speed_code': 0, 'speed_cap': 0, 'step_per_loop': 1, 'sequential': False},
+
+    # # 직선 가속 예시
+    # {'name': 'STRAIGHT_FAST', 'start': 1, 'end': 10,
+    #  'radius_scale': 1.0, 'lookahead_scale': 1.0,
+    #  'speed_code': 8, 'speed_cap': 10, 'step_per_loop': 2,
+    #  'sequential': False},
+
+    # # 교차로: 순차 인덱스
+    # {'name': 'INTERSECTION_1', 'start': 30, 'end': 40,
+    #  'radius_scale': 1.0, 'lookahead_scale': 1.0,
+    #  'speed_code': None, 'speed_cap': None, 'step_per_loop': 2,
+    #  'sequential': True}
 ]
 
 def on_enter_generic(zone): rospy.loginfo(f"[flag] ENTER {zone['name']} {zone['disp_range']}")
@@ -126,6 +146,10 @@ FLAG_HOOKS = {
     'STRAIGHT_FAST':  (on_enter_generic, on_exit_generic),
     'GRADE_UP':       (on_enter_generic, on_exit_generic),
     'STOP':           (on_enter_generic, on_exit_generic),
+    'GRADE_START':       (on_enter_generic, on_exit_generic),
+    'GRADE_GO':       (on_enter_generic, on_exit_generic),
+    'GRADE_END':       (on_enter_generic, on_exit_generic),
+
 }
 
 # ──────────────────────────────────────────────────────────────────
