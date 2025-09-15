@@ -10,6 +10,13 @@
 - 정지(hold) 3초 중/후에도 GRADE_UP 구간에 있는 동안은 1 유지
 - 헤딩 미추정 상태에서도 속도 램핑은 계속 진행(조향만 0), 3초 뒤 바로 출발 보장
 - 구배 토픽 latch 처리 및 시작/종료시 0 청소(레거시 토픽 포함)
+
+0915 오류 수정
+통신 노드엔         
+self.topic_grade= rospy.get_param("~TOPIC_WP_GRADEUP_ON", "/gps/GRADEUP_ON")
+이라 되어있음.
+토픽 이름도 똑같이 맞춰줘야 함. TOPIC_WP_GRADEUP_ON = '/gps/GRADEUP_ON' 으로 하면 됨.
+(TOPIC_GRADEUP_ON = '/gps/GRADEUP_ON' 으로 되어있어 통신 쪽에서 제대로 받지 못함)
 """
 
 import os
@@ -77,8 +84,9 @@ TOPIC_STEER_CMD   = '/gps/steer_cmd'      # Float32 (deg)
 TOPIC_RTK_STATUS  = '/gps/rtk_status'     # String ("FIX"/"FLOAT"/"NONE")
 TOPIC_WP_INDEX    = '/gps/wp_index'       # Int32 (1-based, 반경 밖=0)
 
-TOPIC_GRADE_UP_ON        = '/gps/GRADEUP_ON'   # ← 정식 이름(언더스코어 포함)
-TOPIC_GRADE_UP_ON_LEGACY = '/gps/GRADE_UP_ON'    # ← 과거 오타(청소용)
+TOPIC_WP_GRADEUP_ON        = '/gps/GRADEUP_ON'   # ← 정식 이름(언더스코어 포함)
+
+#TOPIC_GRADE_UP_ON_LEGACY = '/gps/GRADE_UP_ON'    # ← 과거 오타(청소용)
 
 # u-blox 옵셔널 의존성 (RTK 상태)
 _HAVE_RELPOSNED = False
@@ -429,12 +437,12 @@ def _publish_idle_zeros_once():
         if pub_rtk:   pub_rtk.publish(String("NONE"))
         if pub_grade: pub_grade.publish(Int32(0))  # 래치 0
 
-        # 레거시 토픽도 0으로 못박기
-        try:
-            legacy = rospy.Publisher(TOPIC_GRADE_UP_ON_LEGACY, Int32, queue_size=1, latch=True)
-            legacy.publish(Int32(0))
-        except Exception:
-            pass
+        # # 레거시 토픽도 0으로 못박기
+        # try:
+        #     # legacy = rospy.Publisher(TOPIC_GRADE_UP_ON_LEGACY, Int32, queue_size=1, latch=True)
+        #     # legacy.publish(Int32(0))
+        # except Exception:
+        #     pass
     except Exception as e:
         rospy.logwarn(f"[tracker] initial zero publish failed: {e}")
 
@@ -461,15 +469,15 @@ def _on_shutdown():
         latch_speed   = rospy.Publisher(TOPIC_SPEED_CMD,        Float32, queue_size=1, latch=True)
         latch_steer   = rospy.Publisher(TOPIC_STEER_CMD,        Float32, queue_size=1, latch=True)
         latch_wpidx   = rospy.Publisher(TOPIC_WP_INDEX,         Int32,   queue_size=1, latch=True)
-        latch_grade   = rospy.Publisher(TOPIC_GRADE_UP_ON,      Int32,   queue_size=1, latch=True)
-        latch_legacy  = rospy.Publisher(TOPIC_GRADE_UP_ON_LEGACY, Int32, queue_size=1, latch=True)
+        latch_grade   = rospy.Publisher(TOPIC_WP_GRADEUP_ON,      Int32,   queue_size=1, latch=True)
+        #latch_legacy  = rospy.Publisher(TOPIC_GRADE_UP_ON_LEGACY, Int32, queue_size=1, latch=True)
 
         for _ in range(4):
             latch_speed.publish(Float32(0.0))
             latch_steer.publish(Float32(0.0))
             latch_wpidx.publish(Int32(0))
             latch_grade.publish(Int32(0))
-            latch_legacy.publish(Int32(0))
+            #latch_legacy.publish(Int32(0))
             rospy.sleep(0.01)
 
         rospy.loginfo("[tracker] shutdown: latched zeros (incl. legacy) published")
@@ -515,7 +523,7 @@ def main():
     pub_wpidx = rospy.Publisher(TOPIC_WP_INDEX,   Int32,   queue_size=10)
 
     # ★ 구배 토픽은 래치 퍼블리셔
-    pub_grade = rospy.Publisher(TOPIC_GRADE_UP_ON, Int32, queue_size=1, latch=True)
+    pub_grade = rospy.Publisher(TOPIC_WP_GRADEUP_ON, Int32, queue_size=1, latch=True)
 
     rospy.Subscriber(fix_topic, NavSatFix, gps_callback, queue_size=100)
     if _HAVE_RELPOSNED:
