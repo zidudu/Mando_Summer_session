@@ -105,7 +105,8 @@ FLAG_DEFS = [
     # 구배 정지 트리거 구간(반경내 WP 들어오면 1회만 실행)
     {'name': 'GRADE_UP', 'start': 6, 'end': 6,
      'radius_scale': 1.0, 'lookahead_scale': 0.95,
-     'speed_code': None, 'speed_cap': None,
+     'speed_code': None, 'speed_cap': None, # speed_code=None → STRAIGHT 끝나면 기본속도(base_speed, 예: 5)로 정상 복귀 ✅
+                                            # speed_code=0 → STRAIGHT 끝나자마자 속도 0으로 덮어씌워져서 차가 또 멈춤 ❌
      'stop_on_hit': True, 'stop_duration_sec': GRADE_HOLD_SEC,
      'grade_topic': 1},
 
@@ -457,6 +458,8 @@ def _on_shutdown():
         if pub_wpidx: pub_wpidx.publish(Int32(0))
         if pub_grade: pub_grade.publish(Int32(0))
         if pub_rtk:   pub_rtk.publish(String("NONE"))
+
+        rospy.sleep(0.03)   # ← 여기 추가 (30ms 전송 여유)
         rospy.loginfo("[tracker] shutdown zeros published")
     except Exception as e:
         rospy.logwarn(f"[tracker] shutdown failed: {e}")
