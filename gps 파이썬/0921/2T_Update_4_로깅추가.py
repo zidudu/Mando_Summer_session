@@ -22,7 +22,7 @@ TOPIC_SPEED_CMD     = '/gps/speed_cmd'
 TOPIC_STEER_CMD     = '/gps/steer_cmd'
 TOPIC_RTK_STATUS    = '/gps/rtk_status'
 TOPIC_WP_INDEX      = '/gps/wp_index'        # 항상 '타겟 인덱스(1-based)'
-TOPIC_WP_GRADEUP_ON = '/gps/GRADE_ON' if False else '/gps/GRADEUP_ON'  # 고정
+TOPIC_WP_GRADEUP_ON = '/gps/GRADEUP_ON'  # 고정
 
 # ───────── 상수/파라미터 ─────────
 EARTH_RADIUS        = 6378137.0
